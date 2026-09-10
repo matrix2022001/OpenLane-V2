@@ -1,0 +1,39 @@
+[project]
+name = "openlanev2-bev"
+version = "0.1.0"
+description = "OpenLane-V2 BEV video helpers (does not modify official source)"
+readme = "BEV.md"
+requires-python = ">=3.8,<3.9"
+dependencies = [
+    "openxlab>=0.1.3",
+    "tqdm",
+    "ninja",
+    "jupyter",
+    "openmim",
+    # matplotlib 官方未 pin;限定在支持 Python 3.8 的 3.7.x(<3.8 起要求 numpy>=1.21/3.9,
+    # 3.8 起要求 Python>=3.9),否则 exclude-newer 回溯会掉到无法构建的古董版本
+    "matplotlib>=3.3,<3.8",
+    "numpy>=1.22.0,<1.24.0",
+    "scikit-learn",
+    "similaritymeasures",
+    "opencv-python",
+    "scipy==1.8.0",
+    "iso3166",
+    "chardet",
+    "shapely==2.0.0",
+]
+
+# ortools 仅 centerline 评测使用（openlanev2/centerline/evaluation/f_score.py），渲染链路不需要。
+# 官方 requirements.txt pin 的 ortools==9.2.9972 已从 PyPI 下架（404），任何平台都无法安装，
+# 故此处不声明；如需评测请参照官方文档自行处理 ortools。
+
+[tool.uv]
+# requirements.txt 中 jupyter 等未 pin 的包会解析到放弃 Python 3.8 的最新版本
+# （如 pywinpty 2.0.14 无 cp38 轮子且 sdist 无法构建）。官方 pin 的包版本不受影响，
+# 此设置只把未 pin 依赖整体限制在 Python 3.8 still-supported 的时代。
+exclude-newer = "2024-06-01T00:00:00Z"
+# openmim 的发行文件缺上传时间戳，会被 exclude-newer 误过滤，单独放行
+# openmim / cycler 的发行文件缺上传时间戳；openxlab 0.1.3 发布于 2025-10（纯 Python，无 3.8 兼容问题）
+exclude-newer-package = { openmim = false, openxlab = false, cycler = false }
+# 本环境仅在 Windows 上使用，无需为其它平台解析
+environments = ["sys_platform == 'win32'"]
