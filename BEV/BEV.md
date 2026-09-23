@@ -121,7 +121,7 @@ flowchart LR
 - `data/OpenLane-V2/{train,val,test}` 在（train 700 / val 150 / test 150 段）
 - `data/OpenLane-V2/train/00000/info/` 有 **32** 个 `*-ls.json`，与 `data_dict_subset_A.json` 里 `train/00000` 的 32 个 timestamp **一一对应**
 - `data_dict_subset_A.json` 仍在 `data/OpenLane-V2/`
-- **已生成** `data/OpenLane-V2/data_dict_subset_A_ls.pkl`（单段）、`data/OpenLane-V2/data_dict_subset_A_online_ls.pkl`（online 整段 6,136 帧）与 `data/OpenLane-V2/data_dict_subset_A_lanechange_ls.pkl`（lanechange 整段 1,536 帧）——prompt 对齐 + 多次变道输出口径（2026-09 重跑）
+- **已生成** `data/OpenLane-V2/data_dict_subset_A_ls.pkl`（单段）、`data/OpenLane-V2/data_dict_subset_A_online_ls.pkl`（online 整段 3,248 帧）与 `data/OpenLane-V2/data_dict_subset_A_lanechange_ls.pkl`（lanechange 整段 1,760 帧）——车头 `|d_nose|` 压线判据 + 2017 Fusion Hybrid 自车几何（2026-09-23 全量重跑）
 - `data/OpenLane-V2/train/00000/image` **没有**（相机图在 download_dataset 的 image_0 包里，渲染 `--copy-images` 时复制过去）
 
 ### 2.1b 解压前的 OpenXLab 原始布局
@@ -244,19 +244,45 @@ if str(REPO_ROOT) not in sys.path:
 
 画布尺寸由 `config.BEV_SCALE / BEV_RANGE` 决定（官方默认 10 与 `[-50,50,-25,25]` → 1000x500）；脚本在 `main()` 经 `apply_bev_overrides()` 运行时 patch `ls_bev` 与 `cl_bev` 两份模块级常量，不改官方源码。
 
-### 自车叠加（后补，2026-09）
+### 自车叠加（后补，2026-09；自车几何 2026-09-22 改为 2017 Ford Fusion Hybrid）
 
 官方 `draw_annotation_bev` 只画 lane_segment 与 area（`bev.py:78-89`），整个官方可视化模块没有自车绘制参数，因此自车在 `BEV/render_bev_video.py` 内补画（不动官方源码，上面的脚本清单以实际文件为准）：
 
-- 标注为 Ego 坐标系、原点=后轴中心（nuPlan 惯例）；像素映射与官方 `_draw_line` 一致：`col=10×(25−y)`、`row=10×(50−x)`，车头朝上
-- 车型 nuPlan Pacifica：后轴→车尾 1.127 m、后轴→车头 4.049 m、宽 2.297 m（`config.PACIFICA`；`render_bev_video.PACIFICA` 保留为别名）
+- 标注为 Ego 坐标系、原点=后轴中心（AV2 vehicle frame 惯例，arXiv:2301.00493 Fig.8：x 前、y 左、原点在后轴中心）；像素映射与官方 `_draw_line` 一致：`col=10×(25−y)`、`row=10×(50−x)`，车头朝上
+- 车型 **2017 Ford Fusion Hybrid**：后轴→车尾 1.082 m、后轴→车头 3.790 m、车身宽 1.852 m（不含后视镜）。单一来源 `config.EGO_SIZE`，`render_bev_video.EGO_SIZE` 为别名（旧名 `PACIFICA` 已随车型更换移除）
+- 数据源 [Car and Driver 2017 Fusion Hybrid 规格页](https://www.caranddriver.com/ford/fusion/specs/2017/ford_fusion_ford-fusion-hybrid_2017)：Length 191.8 in = 4.872 m、Wheelbase 112.2 in = 2.850 m、Width w/o mirrors 72.9 in = 1.852 m；含后视镜宽 83.5 in = 2.121 m 仅存 `config.EGO_MIRROR_WIDTH` 备查
+- 官方未单独公布前/后悬（Car and Driver、carfolio、automobile-catalog、欧洲 Mondeo 同款页面的 overhang 字段均为 “-”）：前后悬合计 4.872−2.850 = 2.022 m，按三厢前驱比例取 **前悬 0.940 / 后悬 1.082**（同平台 2850 轴距的 Ford Everest 实测前悬 905 / 后悬 1137 同向）。`config.EGO_REAR = EGO_LENGTH − EGO_WHEELBASE − EGO_FRONT_OVERHANG` 反推，保证框长恒等于 4.872 m
 - `draw_ego_vehicle()`：红色实心矩形 + 黑描边 + 白色前向箭头，在 `np.clip` 前叠加
+- 像素核验（`BEV_SCALE=10 px/m`，`train/00000` 首帧，`with_ego` 开/关两图相减取叠加层 bbox）：rows 461..512 × cols 240..260，即含 1 px 描边 5.10 × 2.00 m、框内 50 × 19 px ≈ **4.872 × 1.852 m**；后轴（row 500）距车头 39 px、距车尾 12 px，与 3.790 : 1.082 一致
 - CLI：`--no-ego` 关闭；`--ego-size REAR FRONT WIDTH`（米）覆盖默认尺寸
+
+### 自车几何口径变更（2026-09-22，nuPlan Pacifica → 2017 Fusion Hybrid）
+
+| 量 | 旧（Pacifica） | 新（Fusion Hybrid） | 说明 |
+|---|---|---|---|
+| `EGO_REAR` | 1.127 | **1.082** | 后轴→车尾 |
+| `EGO_FRONT` | 4.049 | **3.790** | 后轴→车头 = 轴距 2.850 + 前悬 0.940 |
+| `EGO_WIDTH` | 2.297（含镜） | **1.852**（不含镜） | 画框与判定同口径 |
+| `EGO_HALF` | 1.1485 | **0.926** | 车体包络半宽（不含镜）：footprint + 变道“线已到车外”判据 |
+| `EGO_CENTER_X` | 1.461 | **1.354** | d 的首选采样站位 |
+| `PRESS_HALF` | 0.90 | **0.90**（不变） | 实测重标定，**非**等比缩放；可行窗 [0.858, 0.950) 的最大余量解 |
+| `PRESS_LINK_HALF` | 1.25 | **1.25**（不变） | 不受可行窗约束，随 `PRESS_HALF` 沿用 |
+| 车体矩形面积 | 11.89 m² | **9.02 m²** | footprint 缩小 24% |
+
+影响面（全部经 `config.py` 派生，判定逻辑未改）：`ego_footprint_local()` → `reference_segment` 的 ref_id 与 `overlap_frac`（路口排除、`OCCUPY_FRAC` 车道占有）、`_bridge_gaps` 有效性、`extract_lanechange_events` 的带外判据（`half=EGO_HALF`）、`d_nose` 采样站位 `x=EGO_FRONT`、BEV 红框尺寸。`SHORT_WINDOW_X=(-0.5,2.0)`、`RAMP_LATERAL`、`SERIES_JUMP_MAX` 非车身派生量，保持不变。
+
+实测结论（2026-09-22，12 个回归段 A/B：`scan_segment` + `extract_online_events` / `extract_lanechange_events`）：
+
+- **`PRESS_HALF` 不能按车身半宽等比缩放**。等比值 0.82 落在可行窗外：回归段 `min|d_nose|` 实测为——必须检出 `00528=0.858`、`00094=0.828`、`00171=0.591`、`00051=0.248`、`00012=0.077`；必须不报 `00013=0.950`、`00001=1.061` → 可行窗 **[0.858, 0.950)**，最大余量解恰好是旧值 **0.90**。用 0.82 跑全量：online 从两百余条掉到 **86 事件 / 81 段**（丢 00528、00094 等浅压线），lanechange 56 / 55（该次产出存 `out/variant_press082_half0926/`，渲染已中止）。
+- **换几何本身是安全的**：用「旧 Pacifica 几何 + 当前工作区代码」重放同 12 段，与「新 Fusion 几何 + 同阈值」几乎逐条一致（仅 `00030` 压线起点 5.5→6.0 差 1 帧；变道时段因 `EGO_HALF` 收窄普遍缩短 0.5–2 s）。
+- **`EGO_HALF=0.926`（车体半宽，不含镜）的已知代价**：`00094` 的变道带内 typed 帧只剩 1 帧（< `MIN_ONLINE_FRAMES=2`）→ **变道事件丢失**。改用含镜包络 `EGO_MIRROR_WIDTH/2=1.0605` 可保住（4.5–5.5 s，2 帧，余量薄），其余 11 段两种口径同为全绿。当前按「画框与判定同用车身宽」的口径取 0.926，接受该丢失。
+- **既有漂移（非本次引入）**：`out/old_baseline_pacifica/online_events.csv` 中 `00094` 有压线事件，但用「旧几何 + 当前工作区代码」重放同样为 0——2026-09-11 基线之后未提交的 filter 改动已让它消失，与自车尺寸无关。
+
 
 ### 线宽与颜色图例（后补，2026-09）
 
 - 线宽：官方 `THICKNESS=4`（`openlanev2/centerline/visualization/utils.py:26`）。脚本在 `main()` 里对 `ls_bev.THICKNESS` / `cl_bev.THICKNESS` 做运行时 patch（默认 2，`--line-width` 可调），不改官方源码。
-- 绘制提速（2026-09）：官方 `_draw_line` 把每条折线 `interp_arc` 重采样到 `config.INTERP_POINTS`（默认 1000，与官方一致）点后逐段 `cv2.line`，每帧约 25 万次调用、~1.4 s/帧。脚本用 `_draw_line_fast`（一次 `cv2.polylines` 替代）运行时 patch `ls_bev._draw_line`，**逐像素 0 差异**（`INTERP_POINTS` 仅作用于快速路径；诊断图走官方实现）。历史实测：32 帧渲染 37.1s→4.3s（8.6×）；旧口径全量 9083 帧 2h21m→12m（当前口径约 7.5k 帧、渲染 ~15 分钟）。`--no-fast-lines` 可回退官方实现。
+- 绘制提速（2026-09）：官方 `_draw_line` 把每条折线 `interp_arc` 重采样到 `config.INTERP_POINTS`（默认 1000，与官方一致）点后逐段 `cv2.line`，每帧约 25 万次调用、~1.4 s/帧。脚本用 `_draw_line_fast`（一次 `cv2.polylines` 替代）运行时 patch `ls_bev._draw_line`，**逐像素 0 差异**（`INTERP_POINTS` 仅作用于快速路径；诊断图走官方实现）。历史实测：32 帧渲染 37.1s→4.3s（8.6×）；旧口径全量 9083 帧 2h21m→12m（当前口径 5,008 帧 = online 3,248 + lanechange 1,760，两组渲染实测 4.6 + 2.6 = 7.2 分钟）。`--no-fast-lines` 可回退官方实现。
 - 颜色映射 `COLOR_DICT`（`utils.py:29-43`），三类元素共用。绘制开关集中在 **`config.RENDER_DRAW`**（视频渲染：attribute=False、linetype=True、centerline=False、laneline=True、area=False）与 **`config.FLAG_DRAW`**（filter 诊断图：五开关全 True）：
   - **中心线**：`with_attribute=False` 时统一蓝色（COLOR_DEFAULT）；若开启 `with_attribute=True` 则按该车道的红绿灯属性着色（`assign_attribute` 从 `topology_lste` 关联）——红=红灯、绿=绿灯、黄=黄灯（attribute 1/2/3）。中心线首尾蓝点为端点顶点标记（`_draw_vertex`）
   - **车道边线**（默认着色来源）：`left/right_laneline_type`（`data/README.md:200-202`）——蓝=0 none、红=1 solid 实线、绿=2 dash 虚线
@@ -268,7 +294,7 @@ if str(REPO_ROOT) not in sys.path:
 
 1. `cd BEV` 后 `uv python pin 3.8` + `uv sync`
 2. `uv run python render_bev_video.py --prepare-data --preprocess --only-segment` → `BEV/vis/bev_00000/bev.mp4`
-3. **一键重判定 + 重渲染行为视频**：`uv run python main.py`（≈25 分钟：filter ~20 分钟 + 两组渲染；先出 `BEV/out/` 的 events csv 与整段 data_dict json，再渲 `BEV/vis/bev_behavior/{online,lanechange}/<split>/<segment>/bev.mp4`，最后写 `BEV/result.md` 结果清单）
+3. **一键重判定 + 重渲染行为视频**：`uv run python main.py`（实测 ≈17 分钟：filter 9.5 分钟 + 两组渲染 7.2 分钟；先出 `BEV/out/` 的 events csv 与整段 data_dict json，再渲 `BEV/vis/bev_behavior/{online,lanechange}/<split>/<segment>/bev.mp4`，最后写 `BEV/result.md` 结果清单）
 4. 分步等价（同手动链路，详见附录 A4）：
    - 判定：`uv run python filter_driving_behavior.py --sample-vis 4 --sample-segments 00012 00040 00051 00094` → `BEV/out/`（online/lanechange 两套 events csv + **整段** data_dict json + 抽样图）
    - 行为视频（有事件的段渲染**该段全部帧**；pkl 已存在时去掉 `--preprocess`）：
@@ -291,12 +317,17 @@ uv run python main.py --dry-run          # 一键链路自检（只打印命令�
 
 > `--sample-vis N`：为 online/lanechange 各渲染 N 张抽样验证图到 `out/vis/`；`--sample-segments` 优先画这些段（有事件才画），不足再按顺序补齐。不影响事件判定与 CSV/JSON 产出。
 
-固定回归段（口径变更后须重跑确认）：
+固定回归段（口径变更后须重跑确认；2026-09-22 自车几何改 2017 Fusion Hybrid 后已重跑）：
 
-- 应检出变道：`00012`、`00051`、`00094`
+- 应检出变道：`00012`、`00051`；`00094` 在新口径下**已知丢失**（`EGO_HALF=0.926` 让带内 typed 帧只剩 1 帧 < `MIN_ONLINE_FRAMES`，详见「自车几何口径变更」）
 - 不应检出变道（压线折返）：`00040`；（导流鼻/分合流误并，2026-09 修复）：`00096`、`00233`、`00240`
+- `PRESS_HALF` 标定段（新几何实测 `min|d_nose|`）：下界 `00528=0.858`、`00094=0.828` 必须检出；上界 `00013=0.950`、`00001=1.061` 必须不报 → 可行窗 **[0.858, 0.950)**，当前取最大余量解 0.90
+- 真实长段骑线应保留：`00171`（0.591）、`00528`（0.858）
+- 重跑前先备份旧产出以便 diff：`out/*.csv|json` → `out/old_baseline_pacifica/`（含 `result_prev.md`）；被否决的阈值组合产出另存 `out/variant_*/`
 
-当前口径（prompt 对齐 + 导流鼻守卫/连续性校验 + 多次变道输出口径 + 侧别/双线口径修正，2026-09-11 重跑）：**online 221 时段 / 191 段**（train 185 + val 36；线型 DASH 86、DOUBLE_SOLID 86、DOUBLE_DASH 32、SOLID 14、CURB 3；方向 LEFT 142、RIGHT 75、BOTH 4）；**lanechange 48 次 / 48 段**（train 41 + val 7；DASH 22、DOUBLE_SOLID 14、DOUBLE_DASH 12；LEFT 24、RIGHT 24）。回归段全部达标：00012/00051/00094 检出变道，00040 不判变道，00096/00233 导流鼻假变道与 00240 分合流反向假变道已消除（00171/00528 真实长段骑线保留）；00012-30-51/94 的 online/lanechange 线型与侧别已对照相机画面人工核验一致。
+当前口径（**车头 `|d_nose| ≤ PRESS_HALF` 压线判据** + 2017 Fusion Hybrid 自车几何 + prompt 对齐 + 导流鼻守卫/连续性校验 + 多次变道输出 + 侧别/双线口径修正，2026-09-23 全量重跑，filter 9.5 min + 渲染 7.2 min）：**online 105 时段 / 101 段**（train 83 + val 18；线型 DASH 50、DOUBLE_SOLID 31、DOUBLE_DASH 22、SOLID 2；方向 LEFT 56、RIGHT 47、BOTH 2；事件覆盖帧 496，渲染整段 3,248 帧）；**lanechange 56 次 / 55 段**（train 45 + val 10；DASH 27、DOUBLE_SOLID 16、DOUBLE_DASH 13；RIGHT 29、LEFT 27；覆盖帧 221，渲染整段 1,760 帧）。回归段：00012/00030/00051 压线+变道均检出，00040/00233/00240 只压线不判变道，00096 全 0，00001/00013 不误报，00171/00528 长段骑线保留——**唯 00094 全丢**：压线在车头判据下只有 1 帧达到 level-2（用旧 Pacifica 几何重放同样为 0，属判据变更而非换车型所致）；变道因 `EGO_HALF=0.926` 使带内 typed 帧只剩 1 帧（改含镜 1.0605 可恢复为 4.5–5.5 s）。
+
+上一版口径（2026-09-11 重跑，**已提交代码**：压线 = 车体中心 `|d| ≤ EGO_HALF`，自车 Pacifica）：online 221 时段 / 191 段（train 185 + val 36；DASH 86、DOUBLE_SOLID 86、DOUBLE_DASH 32、SOLID 14、CURB 3；LEFT 142、RIGHT 75、BOTH 4）；lanechange 48 次 / 48 段（train 41 + val 7；DASH 22、DOUBLE_SOLID 14、DOUBLE_DASH 12；LEFT 24、RIGHT 24）。**与当前口径不可直接比较**：压线判据由“车体中心 `|d|` ≤ 半宽”换成“车头 `|d_nose|` ≤ 0.90”是本次换车型之前工作区里已有的未提交改动；12 段 A/B 表明换几何本身几乎不改变结果（仅 00030 压线起点 5.5→6.0 差 1 帧）。
 
 更早口径（整车 AABB 窗口）旧数仅作对照：online 470 / 2,809 / 332 段；lanechange 71 / 393 / 71 段。抽查确认差异合理：丢失段（如 00037/00057）系 AABB 车头/车尾斜切误报、type-0 无标线段按 prompt 不再计事件；新增段来自 A 情形按 prompt 去掉占有强约束。
 
@@ -316,7 +347,7 @@ uv run python filter_driving_behavior.py --sample-vis 4 --sample-segments 00012 
 
 - **数据源**：直接读 `data_dict_subset_A.json` 的 train+val 全部 `-ls.json`（test 无标注，不参与）
 - **物理线合并**：同一 `(seg_id, side)` 保留弧长最长的一次全局观测（避免首次 ±50m stub 对不上端点），再按端点匹配（tol 0.3m）+ **接缝方向一致（夹角<60°，零向量余弦为 0）** 跨 key 拼接；**跨侧（left↔right）拼接需重叠弧长 ≥1m**——共享边界（A.right==B.left 整段平行重叠）可并，导流鼻处左右边界仅在节点收敛属不同物理线、禁并（00096 假变道根因，修复后该段 online/lanechange 均为 0，00040 线型由 SOLID 修正为 DOUBLE_SOLID）；端点匹配失败的接缝用 **stitch_groups** 兜底——两条链在共同或相邻帧 `|Δd| ≤ 0.25m`（typed-priority d）且方向兼容（任链方向退化/闭合则免检，否则 |cos|≥0.8）即视为同一物理线合并成员（00094 的穿越线被 type-0 碎片隔断即靠此接回）；聚类前另有一遍**重合链合并**（间距<0.03m 且重叠弧长 ≥1m 的两条链并成一条，见线型条目）
-- **d 逐帧用当前帧标注直接计算**：优先在几何中心 `x=EGO_CENTER_X`、其次后轴 `x=0` 对折线插值求带符号 y；两处都无交则回退短窗口 `x∈[-0.5, 2.0]`。**不再用整车 5.2m AABB**，避免弯道边线斜切车头/车尾误报压线。`|d| ≤ 1.1485`（车半宽）= 正下方。**时段物理连续性校验**：进入/离开/内部相邻帧 d 跳变均 ≤ `SERIES_JUMP_MAX`=1.8m/帧（进入/离开证据跨多帧时阈值按帧距等比放宽）才成事件——Y 形链（导流鼻分支）的 min|d| 会在分支间产生 ≥2.2m 单帧跳变（00233 假变道根因），真实骑线含单帧噪声抖动（≤1.7m，如 00528）不受影响。已知取舍：穿越前一刻链中混入他线值（如 00621 f0 污染）会被保守拒绝，宁缺毋滥
+- **d 逐帧用当前帧标注直接计算**：优先在几何中心 `x=EGO_CENTER_X`、其次后轴 `x=0` 对折线插值求带符号 y；两处都无交则回退短窗口 `x∈[-0.5, 2.0]`。**不再用整车 AABB**（旧口径 5.2 m、新车长 4.872 m），避免弯道边线斜切车头/车尾误报压线。`|d| ≤ 0.926`（车身半宽，不含后视镜）= 正下方。**时段物理连续性校验**：进入/离开/内部相邻帧 d 跳变均 ≤ `SERIES_JUMP_MAX`=1.8m/帧（进入/离开证据跨多帧时阈值按帧距等比放宽）才成事件——Y 形链（导流鼻分支）的 min|d| 会在分支间产生 ≥2.2m 单帧跳变（00233 假变道根因），真实骑线含单帧噪声抖动（≤1.7m，如 00528）不受影响。已知取舍：穿越前一刻链中混入他线值（如 00621 f0 污染）会被保守拒绝，宁缺毋滥
 - **线型**（OpenLane 只有 0/1/2，在 BEV 内推断，不改 prompt）：事件线型 = **时段内逐帧原始线型多数投票**（链首类型不再作数）；`NONE`（0）不产生压线事件，但其 ego 系 d 作**影子证据**（穿越前后位置、链缝合；prompt："标线消失段不判压线，重新清晰后继续判定"）；平行间距 0.03~0.5m 的一对边线聚成 `DOUBLE_SOLID` / `DOUBLE_DASH` / `LEFT_SOLID_RIGHT_DASH` / `LEFT_DASH_RIGHT_SOLID`（骑压任意一条记组类型）；间距<0.03m 且重叠弧长 ≥1m 的记录是**同一物理线的重合观测**（共享边界 A.right==B.left），先并成单线、不算双线（00030 误升 DOUBLE_DASH 根因）；AV2 地图把双黄中心线存成相邻两段共享的一条线——含共享 SOLID 重合记录、且组全帧原始线型多数为 SOLID 的单线组升为 `DOUBLE_SOLID`（00040/00051/00094；共享 DASH 仍为单线，虚线段延伸进实线段的混合组多数为 DASH 不升）；`area.category=2` 路沿记 `CURB`（按车左/右侧分键，防 area id 串号）。无宽度信息不输出 `WIDE_DASH`（数据侧限制）；导流线边缘在数据中即实线，自然输出 `SOLID`
 - **压线（online）**：同一物理线连续压线 **≥2 帧**；非排除帧最多 **2 帧** 空洞按两侧线性插值桥接（两侧异号记 0；桥接帧不参与方向计票）。方向（prompt 第三步：**压线开始前该线从哪一侧过来**；骑线时线已在中轴，不能用当时的左右位置）：**进入前数帧内最近 `|d|>0.05` 有效帧的符号** → 无进入前证据（如视频开头即骑线）回退时段内多数符号 → 平票取时段内最后有效帧 → 再回退时段 mean d 符号（旧实现以时段内多数符号为首选，变道穿越后符号翻转导致 00012/00030/00094 侧别判反，2026-09-11 修正）。时间重叠且分居车左右的事件（含合并后区间扩张新触及的）全部一并合并为 `BOTH`，线型取最左左线的。重复时段去重：同一物理链直接合并；不同链若区间重叠且共同时段帧 `mean|Δd|≤0.25m`（共享边界 A.right/B.left 碎片）同样合并
 - **完整变道（lanechange，prompt 第三步【占有/越线深度 满足任一】）**：
@@ -325,9 +356,9 @@ uv run python filter_driving_behavior.py --sample-vis 4 --sample-segments 00012 
   - **占有**（prompt 条件1，**视频结束时**判定）：参考段 = 与车体相交面积最大者；ref0 从时段起点最多回溯 10 帧，ref1 取末帧起向前首个有效非排除帧；新段相交面积占车体 >0.5。若拓扑上是纵向后继但中心线横向偏移 >1.5m（匝道分流）仍算占有
   - 方向：线左→右 = 车 LEFT。输出**全部**完整变道，按时间顺序（prompt"多次变道"，对应 `line_events` 数组；CSV 中同段多事件多行）。LC 压线段同样需 **≥2 帧**；**区间重叠且方向相反**的一对（道路分合流，车直行穿过分叉）双双剔除（00240），同向重叠/相接（一次变道扫过线对的多条链）合并为一次（00158）
 - **路口排除**：① ic 段的线不参与；② 参考段为 ic 的帧整帧不算并打断时段。**人行横道单独相交不整帧打断**（斑马线上标注线型仍清晰，按 prompt 以"线是否可见"为准；磨损无标注信息，不建模）。`topology_lsls` 每帧都算（排除帧也写 pairs）
-- **产出**（`BEV/out/`）：事件 CSV；有事件的段在 data_dict json 中写入**该段全部 timestamp**（整段渲染）；`vis/` 抽样图优先 00012/00040/00051/00094
+- **产出**（`BEV/out/`）：事件 CSV；有事件的段在 data_dict json 中写入**该段全部 timestamp**（整段渲染）；`vis/` 抽样图优先 00012/00040/00051/00094（`config.SAMPLE_SEGMENTS`；00094 在车头压线判据下已无事件，会自动落到后续有事件的段）
 - **抽样验证图**：绘制开关取 `config.FLAG_DRAW`（attribute 着色 + area 全开）
-- **全量结果**（prompt 对齐 + 导流鼻守卫/连续性校验 + 多次变道输出 + 侧别/双线口径修正，2026-09-11 重跑）：online 221 时段 / 191 段（事件覆盖帧 1,314，渲染整段 6,136 帧）；lanechange 48 次 / 48 段（事件覆盖帧 249，渲染整段 1,536 帧）。回归：00012/00051/00094 有变道、00040/00096/00233/00240 无，全部达标。起止时间保留 0.1s 精度（prompt 的 0.5s 近似面向人工标视频，真值文件不取整）
+- **全量结果**（车头 `|d_nose|` 压线判据 + 2017 Fusion Hybrid 自车几何 + prompt 对齐 + 导流鼻守卫/连续性校验 + 多次变道输出 + 侧别/双线口径修正，2026-09-23 重跑）：online 105 时段 / 101 段（事件覆盖帧 496，渲染整段 3,248 帧）；lanechange 56 次 / 55 段（事件覆盖帧 221，渲染整段 1,760 帧）。回归：00012/00030/00051 有变道，00040/00096/00233/00240 无，00001/00013 无假压线，00171/00528 长段骑线保留；**00094 全丢**（详见「自车几何口径变更」与步骤 5 口径段）。起止时间保留 0.1s 精度（prompt 的 0.5s 近似面向人工标视频，真值文件不取整）
 
 ### 按段拆分输出 + 相机图 + 分文件夹（2026-09）
 
@@ -383,7 +414,7 @@ uv run python filter_driving_behavior.py --sample-vis 4 --sample-segments 00012 
 | `--sample-segments` | 00012 00040 00051 00094 | 抽样优先段（有事件才画），不足再按顺序补齐 |
 | `--limit-segments` | 0 | 调试用：每 split 只处理前 N 段 |
 
-产出（全量约 20 分钟，含链缝合/去重开销）：`online_events.csv`、`lanechange_events.csv`、`data_dict_subset_A_online.json`、`data_dict_subset_A_lanechange.json`、`vis/*.png`。json 文件名前缀取 `--data-dict` 的文件名 stem（默认即 `data_dict_subset_A_*`）。有事件的段在 json 中写入**该段全部 timestamp**，与官方 data_dict 同构，可直接喂给渲染脚本。
+产出（全量实测 9.5 分钟，含链缝合/去重开销）：`online_events.csv`、`lanechange_events.csv`、`data_dict_subset_A_online.json`、`data_dict_subset_A_lanechange.json`、`vis/*.png`。json 文件名前缀取 `--data-dict` 的文件名 stem（默认即 `data_dict_subset_A_*`）。有事件的段在 json 中写入**该段全部 timestamp**，与官方 data_dict 同构，可直接喂给渲染脚本。
 
 ### A3. `render_bev_video.py` —— 渲染（数据准备 → collect → 逐帧绘制 → mp4）
 
@@ -417,15 +448,15 @@ uv run python filter_driving_behavior.py --sample-vis 4 --sample-segments 00012 
 | `--with-ego` / `--no-ego` | 开 | 自车框叠加（官方 API 不画自车，脚本补画） |
 | `--centerline` / `--no-centerline` | 取 `config.RENDER_DRAW` | 车道中心线（蓝色）。默认不渲染，画面只留边线 |
 | `--laneline` / `--no-laneline` | 取 `config.RENDER_DRAW` | 左右边线（蓝=none、红=实线、绿=虚线） |
-| `--ego-size REAR FRONT WIDTH` | 1.127 4.049 2.297 | 自车尺寸（米，nuPlan Pacifica：后轴→车尾/后轴→车头/宽） |
+| `--ego-size REAR FRONT WIDTH` | 1.082 3.790 1.852 | 自车尺寸（米，2017 Ford Fusion Hybrid：后轴→车尾 / 后轴→车头 / 车身宽不含后视镜） |
 | `--line-width` | 2 | 运行时 patch 官方 `THICKNESS=4`，不改源码 |
 | `--no-fast-lines` | 关 | 关闭 `cv2.polylines` 提速 patch（零像素差异），回退官方逐段 `cv2.line`（慢 ~8 倍） |
-| （仅 config.py） | — | `BEV_SCALE / BEV_RANGE`（画布）、`INTERP_POINTS`（重采样点数，仅快速路径）、`VIDEO_FOURCC`、`WITH_SD_MAP`、`TIME_OVERLAY`（烧字）、`EGO_STYLE`（自车框配色）、`RENDER_DRAW / FLAG_DRAW`（绘制开关组） |
+| （仅 config.py） | — | `EGO_LENGTH / EGO_WHEELBASE / EGO_FRONT_OVERHANG / EGO_SIZE / EGO_MIRROR_WIDTH`（自车几何，2017 Fusion Hybrid）、`EGO_HALF / EGO_CENTER_X / PRESS_HALF / PRESS_LINK_HALF`（判定派生量）、`BEV_SCALE / BEV_RANGE`（画布）、`INTERP_POINTS`（重采样点数，仅快速路径）、`VIDEO_FOURCC`、`WITH_SD_MAP`、`TIME_OVERLAY`（烧字）、`EGO_STYLE`（自车框配色）、`RENDER_DRAW / FLAG_DRAW`（绘制开关组） |
 
 ### A4. 典型链路（一键 = `main.py`）
 
 ```bash
-# 0) 一键：重新判定压线/变道 + 重渲染两组行为视频（~25 分钟）
+# 0) 一键：重新判定压线/变道 + 重渲染两组行为视频（实测 ~17 分钟）
 uv run python main.py
 
 # main.py 常用开关
@@ -439,7 +470,7 @@ uv run python main.py --limit-segments 2 --filter-out-dir out/_test --collection
 # 1) 单段标注视频（32 帧，几秒）
 uv run python render_bev_video.py --prepare-data --preprocess --only-segment
 
-# 2) 行为筛选（全量 ~20 分钟）
+# 2) 行为筛选（全量实测 9.5 分钟）
 uv run python filter_driving_behavior.py --sample-vis 4 --sample-segments 00012 00040 00051 00094
 
 # 3) 两组行为视频（有事件则整段；pkl 已有则去掉 --preprocess）
@@ -459,4 +490,3 @@ uv run python render_bev_video.py --data-dict out/data_dict_subset_A_lanechange.
 - **不用 SparseDrive / PyTorch**
 - 不重新下载数据；info-ls 已解压，collect 只跑单段与行为子集，不跑全集
 - 不把密钥写进文档或脚本
-

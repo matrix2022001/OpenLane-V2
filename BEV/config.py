@@ -22,11 +22,43 @@ OUT_DIR = BEV_DIR / "out"                      # 筛选产出目录
 VIS_DIR = BEV_DIR / "vis"                      # 渲染输出根目录
 RESULT_MD = BEV_DIR / "result.md"              # main.py 渲染完成后写出的结果清单
 
-# ---------------- 自车（nuPlan Pacifica，米；原点=后轴中心） ----------------
-EGO_REAR, EGO_FRONT, EGO_WIDTH = 1.127, 4.049, 2.297
-PACIFICA = (EGO_REAR, EGO_FRONT, EGO_WIDTH)
-EGO_HALF = EGO_WIDTH / 2                       # 车体半宽（压线判定阈值）
-EGO_CENTER_X = (EGO_FRONT - EGO_REAR) / 2      # 几何中心在 ego 系的 x
+# ---------------- 自车（2017 Ford Fusion Hybrid，米；原点=后轴中心） ----------------
+# 数据源（Car and Driver 2017 Fusion Hybrid 规格页，与 carfolio / automobile-catalog
+# 的 mm 值一致）：https://www.caranddriver.com/ford/fusion/specs/2017/ford_fusion_ford-fusion-hybrid_2017
+#   Length 191.8 in = 4.872 m；Wheelbase 112.2 in = 2.850 m
+#   Width w/o mirrors 72.9 in = 1.852 m；Width w/ mirrors 83.5 in = 2.121 m
+# 官方只公布总长与轴距 -> 前后悬合计 2.022 m，各家目录的 overhang 字段均为 “-”；
+# 按三厢前驱车比例取前悬 0.940 m、后悬 1.082 m（同平台 2850 轴距的 Ford Everest
+# 实测前悬 905 / 后悬 1137 同向）。原点=后轴中心与 AV2 vehicle frame 一致
+# （arXiv:2301.00493 Fig.8：x 前、y 左、原点在后轴中心）。
+EGO_LENGTH = 4.872
+EGO_WHEELBASE = 2.850
+EGO_FRONT_OVERHANG = 0.940                     # 前保->前轴（推算值，见上）
+EGO_REAR = round(EGO_LENGTH - EGO_WHEELBASE - EGO_FRONT_OVERHANG, 3)   # 后轴->车尾 1.082
+EGO_FRONT = round(EGO_WHEELBASE + EGO_FRONT_OVERHANG, 3)               # 后轴->车头 3.790
+EGO_WIDTH = 1.852                              # 车身宽，不含后视镜（72.9 in）
+EGO_MIRROR_WIDTH = 2.121                       # 含后视镜宽（83.5 in），仅备查
+EGO_SIZE = (EGO_REAR, EGO_FRONT, EGO_WIDTH)    # 画框/判定共用的单一来源
+# 车体包络半宽：footprint（参考段/路口排除/车道占有）与变道“线已到车外”判据
+# 都用车身宽（不含后视镜）；含镜包络半宽 1.0605 仅备查。
+# 已知代价（2026-09-22 A/B 实测）：00094 的变道带内 typed 帧只剩 1 帧
+# （< MIN_ONLINE_FRAMES=2）而丢失；改用含镜 1.0605 可保住（4.5-5.5s，2 帧）。
+EGO_HALF = EGO_WIDTH / 2                       # 0.926
+EGO_CENTER_X = (EGO_FRONT - EGO_REAR) / 2      # 1.354；几何中心在 ego 系的 x
+# 画框与判定同口径（均不含后视镜），旧口径曾把含镜宽 2.297 用于画框。
+EGO_BODY_WIDTH = EGO_WIDTH
+# 压线只看车头 x=EGO_FRONT，车身中部仅擦到外缘不算（00001 弯道误报）。
+# 车身半宽 0.926m 仍会把贴着外缘的线算进去：前视里这条线在引擎盖外侧。
+# 阈值不按车身半宽等比缩放，而是换几何后在 12 个回归段上实测重标定
+# （2026-09-22，scan_segment 的 min|d_nose|）：
+#   必须检出：00528=0.858、00094=0.828、00171=0.591、00051=0.248、00012=0.077
+#   必须不报：00013=0.950、00001=1.061
+# -> 可行窗 [0.858, 0.950)，取最大余量解 0.90（与旧 Pacifica 口径同值；
+#    等比缩放值 0.82 落在窗外，会丢掉 00528 与 00094 的压线）。
+PRESS_HALF = 0.90
+# 车头距短暂超出车身、但仍不超过此值时，视为同一次压线，避免穿越中途被拆开
+# （不受上述可行窗约束；PRESS_HALF 未变故沿用旧值 1.25）
+PRESS_LINK_HALF = 1.25
 
 # ---------------- 渲染 ----------------
 SPLIT = "train"
@@ -81,7 +113,8 @@ FLAG_DRAW = {
 
 # ---------------- 行为检测（filter_driving_behavior.py） ----------------
 FRAME_DT = 0.5                                 # 标称帧间隔（时段末尾 +0.5s 结束偏移）
-SHORT_WINDOW_X = (-0.5, 2.0)                   # d 回退短窗口 x∈[x0,x1]
+SHORT_WINDOW_X = (-0.5, 2.0)                   # d 回退短窗口 x∈[x0,x1]；固定值，
+                                               # 非车身派生量（换车型不调）
 MERGE_ENDPOINT_TOL = 0.3                       # 物理线端点匹配容差（米）
 SEAM_COS = 0.5                                 # 接缝方向一致阈值（cos>0.5 即夹角<60°）
 DOUBLE_SEP = 0.5                               # 双线组平行间距（米）

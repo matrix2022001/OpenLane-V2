@@ -1,9 +1,16 @@
 """压线（online）/ 变道（lanechange）行为筛选。
 
 判定逻辑对齐 prompts/online_prompt.md 与 prompts/lanechange_prompt.md：
-- 压线 = 车道线处于车体正下方：优先在几何中心 x=EGO_CENTER_X、其次后轴
-  x=0 对折线插值求带符号横向距 d（左正右负）；两处都没有则回退短窗口
-  x∈[-0.5, 2.0]。|d| <= 车体半宽即压线。不用整车 5.2m AABB，避免弯道误报。
+- 自车几何单一来源 = config.EGO_SIZE（2017 Ford Fusion Hybrid，米；原点=后轴
+  中心，与 AV2 vehicle frame 一致）：后轴->车尾 1.082、后轴->车头 3.790、
+  车身宽 1.852（不含后视镜，含镜 2.121 仅备查）。footprint（参考段 / 路口
+  排除 / 车道占有）、d 采样站位 EGO_CENTER_X=1.354、压线阈值都由它派生。
+- 压线 = 车道线处于车头近处：在 x=EGO_FRONT 对折线求带符号横向距
+  d_nose（左正右负），|d_nose| <= PRESS_HALF（0.82m，比车身半宽 0.926m
+  再收一截）才算压线。只擦到车身外缘、前视里仍在引擎盖外侧
+  的线不算（00013）。线没交到车头不算。方向、连续性、变道仍用车身中部 d
+  （几何中心 / 后轴 / 短窗口），避免弯道边线只擦到车身外缘或车身中部
+  就被记成压线（00001）。
 - 每帧 d 用当前帧自身标注的 ego 系点直接计算（标注按每帧 ±50m 视野截断）；
   全局几何仅用于物理线合并与双线聚类。
 - 物理线合并：同一 (seg_id, side) 保留弧长最长的一次观测，再按端点匹配
@@ -21,7 +28,7 @@
   （共享 DASH 仍为单线）。area.category=2 路沿记 CURB（按车左右侧分键防 area
   id 冲突）。NONE（type-0）线不产生压线事件，但其 ego 系 d 作为影子证据参与
   穿越前后判定与链缝合。
-- 压线时段（online）：同一物理线连续压线 >= 2 帧；非排除帧最多 2 帧空洞
+- 压线时段（online）：车头 |d_nose|<=PRESS_HALF 的连续帧 >= 2；非排除帧最多 2 帧空洞
   按两侧线性插值桥接（两侧异号记 0，桥接帧不参与方向计票）。方向（prompt
   第三步）= 压线开始前该线所在侧：进入前数帧内最近 |d|>0.05 有效帧符号
   -> 无进入前证据回退时段内有效帧多数符号 -> 平票取时段内最后一个有效帧
@@ -78,8 +85,10 @@ PROMPT_TYPES = {
 }
 # 全部可调参数见 config.py；以下为兼容别名（单一来源 = config）
 FRAME_DT = C.FRAME_DT
-REAR, FRONT, EGO_WIDTH = C.PACIFICA
+REAR, FRONT, EGO_WIDTH = C.EGO_SIZE   # 2017 Fusion Hybrid，原点=后轴中心
 HALF = C.EGO_HALF
+PRESS_HALF = C.PRESS_HALF
+PRESS_LINK_HALF = C.PRESS_LINK_HALF
 EGO_CENTER_X = C.EGO_CENTER_X
 SHORT_X0, SHORT_X1 = C.SHORT_WINDOW_X
 DOUBLE_SEP = C.DOUBLE_SEP
@@ -619,7 +628,8 @@ def scan_segment(root, split, segment, timestamps):
                     if d is not None:
                         # type-0（NONE）线作为影子证据：不触发压线，仅用于
                         # 穿越前后位置与链缝合（prompt：标线重现后"继续判定"）
-                        dmap[key] = (d, raw_lt)
+                        # 第三项是车头 x=EGO_FRONT 的 y，专供压线；没有交点则为 None
+                        dmap[key] = (d, raw_lt, _y_at_x(pts, C.EGO_FRONT))
             for area in annotation.get("area", []):
                 if area.get("category", 0) != 2:
                     continue
@@ -634,7 +644,7 @@ def scan_segment(root, split, segment, timestamps):
                     continue
                 d = signed_lateral(pts)
                 if d is not None:
-                    dmap[key] = (d, 3)
+                    dmap[key] = (d, 3, _y_at_x(pts, C.EGO_FRONT))
         frames.append((ts, excluded, ref_id, pairs, overlap_frac, lane_y))
         per_frame_d.append(dmap)
 
@@ -665,13 +675,15 @@ def scan_segment(root, split, segment, timestamps):
                         cands = typed or cands
                     best = min(cands, key=lambda c: abs(c[0]))
             if best is None:
-                seq.append((idx, None, None, exc, False))
+                seq.append((idx, None, None, exc, False, None))
             else:
                 raw = _lt_name(best[1])
                 if group_lt is not None and (is_double or raw is not None):
                     # 组类型覆盖逐帧投票；shared-solid 组仍尊重 type-0 影子帧
                     raw = group_lt
-                seq.append((idx, best[0], raw, exc, False))
+                noses = [c[2] for c in cands if len(c) > 2 and c[2] is not None]
+                d_nose = min(noses, key=abs) if noses else None
+                seq.append((idx, best[0], raw, exc, False, d_nose))
         series[label] = (_bridge_gaps(seq, half), group_lt)
     return frames, series
 
@@ -693,8 +705,8 @@ def _bridge_gaps(seq, half, max_hole=C.MAX_HOLE_FRAMES):
         if hole < 1 or hole > max_hole or j >= n:
             i = max(j, i + 1)
             continue
-        _p, pd, plt, pexc, _pb = out[i - 1]
-        _n, nd, nlt, nexc, _nb = out[j]
+        _p, pd, plt, pexc, _pb, pnose = out[i - 1]
+        _n, nd, nlt, nexc, _nb, nnose = out[j]
         if pexc or nexc or pd is None or nd is None:
             i = j
             continue
@@ -703,14 +715,20 @@ def _bridge_gaps(seq, half, max_hole=C.MAX_HOLE_FRAMES):
             continue
         span = j - (i - 1)
         for k in range(i, j):
+            t = (k - (i - 1)) / float(span)
             if pd * nd < 0:
                 d = 0.0
             else:
-                t = (k - (i - 1)) / float(span)
                 d = pd + (nd - pd) * t
             out[k][1] = d
             out[k][2] = plt if plt is not None else nlt
             out[k][4] = True
+            if pnose is None or nnose is None:
+                out[k][5] = None
+            elif pnose * nnose < 0:
+                out[k][5] = 0.0
+            else:
+                out[k][5] = pnose + (nnose - pnose) * t
         i = j
     return [tuple(e) for e in out]
 
@@ -980,27 +998,55 @@ def _label_side(label):
     return label[0], ".".join(str(x) for x in label[1:])
 
 
-def extract_online_events(frames, series, half=HALF):
-    """连续 |d|<=half 且 >=2 帧 -> 压线时段（prompt: 仅一帧蹭线不算）。
-    type-0 影子帧（lt=None）不算骑线，但可被 _nearest_outside 借用。"""
+def _nose_level(d_nose, lt, press, link):
+    """2=线在车身下，1=刚出车身但仍属同一次压线，0=不算。"""
+    if d_nose is None or lt is None:
+        return 0
+    dist = abs(d_nose)
+    if dist <= press:
+        return 2
+    if dist <= link:
+        return 1
+    return 0
+
+
+def _trim_press_run(run):
+    """丢掉首尾只是贴着车身外侧的帧，保留中间把同一次压线连起来的帧。"""
+    while run and run[0][-1] < 2:
+        run.pop(0)
+    while run and run[-1][-1] < 2:
+        run.pop()
+    return run
+
+
+def extract_online_events(frames, series, half=None):
+    """车头进入前盖范围（|d_nose|<=PRESS_HALF）且连续 >=2 帧 -> 压线时段。
+    没交到车头、只擦到后视镜宽度、或只贴着车身外缘的线不算。穿越过程中
+    车头距短暂落到 PRESS_LINK_HALF 内不拆段。type-0 影子帧不算骑线。"""
+    if half is None:
+        half = PRESS_HALF
     events = []
     for label, (seq, _gtype) in series.items():
         seg_id, side = _label_side(label)
         run = []
-        for idx, d, lt, _exc, bridged in seq:
-            online = d is not None and lt is not None and abs(d) <= half
-            if online:
-                run.append((idx, d, lt, bridged))
+
+        def flush():
+            kept = _trim_press_run(run)
+            if (len(kept) >= C.MIN_ONLINE_FRAMES
+                    and any(item[-1] == 2 for item in kept)
+                    and _run_continuous(seq, kept[0][0], kept[-1][0])):
+                events.append(_mk_event(
+                    frames, [(i, d, lt, b) for i, d, lt, b, _lv in kept],
+                    seg_id, side, seq=seq, key=label))
+
+        for idx, d, lt, _exc, bridged, d_nose in seq:
+            level = _nose_level(d_nose, lt, half, PRESS_LINK_HALF)
+            if level:
+                run.append((idx, d, lt, bridged, level))
             else:
-                if len(run) >= C.MIN_ONLINE_FRAMES \
-                        and _run_continuous(seq, run[0][0], run[-1][0]):
-                    events.append(_mk_event(
-                        frames, run, seg_id, side, seq=seq, key=label))
+                flush()
                 run = []
-        if len(run) >= C.MIN_ONLINE_FRAMES \
-                and _run_continuous(seq, run[0][0], run[-1][0]):
-            events.append(_mk_event(
-                frames, run, seg_id, side, seq=seq, key=label))
+        flush()
     return merge_both_events(frames, merge_events(events, series, frames))
 
 

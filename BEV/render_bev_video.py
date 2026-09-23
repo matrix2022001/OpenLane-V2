@@ -23,8 +23,9 @@ import openlanev2.centerline.visualization.bev as cl_bev
 
 import config as C
 
-# 兼容旧引用：自车参数（nuPlan Pacifica，米；原点=后轴中心）与插值点数集中在 config.py
-PACIFICA = C.PACIFICA
+# 兼容旧引用：自车参数（2017 Ford Fusion Hybrid，米；原点=后轴中心）与插值点数
+# 集中在 config.py
+EGO_SIZE = C.EGO_SIZE
 N_POINTS = C.N_POINTS
 
 
@@ -48,9 +49,9 @@ def _ego_to_row(x_ego):
 
 def draw_ego_vehicle(image, rear=None, front=None, width=None):
     """在标注 BEV 图上叠加自车矩形。官方 draw_annotation_bev 不画自车，故在此补画。
-    尺寸默认 config.PACIFICA，样式默认 config.EGO_STYLE。"""
+    尺寸默认 config.EGO_SIZE，样式默认 config.EGO_STYLE。"""
     if rear is None or front is None or width is None:
-        rear, front, width = C.PACIFICA
+        rear, front, width = C.EGO_SIZE
     s = C.EGO_STYLE
     half = width / 2
     pt1 = (_ego_to_col(half), _ego_to_row(front))
@@ -193,8 +194,9 @@ def parse_args():
         nargs=3,
         type=float,
         metavar=("REAR", "FRONT", "WIDTH"),
-        default=list(C.PACIFICA),
-        help="自车尺寸（米）：后轴到车尾、后轴到车头、车宽",
+        default=list(C.EGO_SIZE),
+        help="自车尺寸（米）：后轴到车尾、后轴到车头、车宽"
+             "（默认 2017 Ford Fusion Hybrid：1.082 3.790 1.852）",
     )
     parser.add_argument("--info-ls-tar", default=str(C.INFO_LS_TAR))
     return parser.parse_args()
@@ -271,7 +273,7 @@ def copy_segment_images(image_root, split, segment, timestamps, dst_dir, cameras
 
 
 def render_segment(root, collection, split, segment, out_dir, fps, with_ego=True,
-                   ego_size=C.PACIFICA, no_png=False, per_segment=False,
+                   ego_size=C.EGO_SIZE, no_png=False, per_segment=False,
                    copy_images=False, image_root=None, cameras=tuple(C.CAMERAS),
                    with_centerline=None, with_laneline=None):
     print("官方 collect / draw_annotation_bev，CPU 绘制标注 BEV。")
